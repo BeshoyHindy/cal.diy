@@ -1,0 +1,76 @@
+name: Pantryk GHCR Build
+
+# One-off Cal.diy image build for Pantryk (BeshoyHindy/pantryk-mono#988).
+# Upstream publishes no images (Docker Hub + GHCR both empty as of
+# 2026-08-17), so this fork builds the root Dockerfile at the pinned
+# upstream SHA this branch sits on (main @ 176037d0, 2026-08-08) and
+# pushes to ghcr.io/beshoyhindy/cal.diy for digest-pinned deployment.
+#
+# The recipe mirrors upstream .github/actions/docker-build-and-test:
+# the Next.js build needs a reachable Postgres, provided by the repo
+# compose file with buildx bound to that container's network. Build
+# args match what upstream's own release workflow bakes into official
+# images (dummy build-time DB credentials from .env.example; the
+# runtime DATABASE_URL is injected at deploy time). Heap stays at the
+# Dockerfile default (MAX_OLD_SPACE_SIZE=6144), which fits the free
+# public-repo 4-core/16 GB ubuntu-latest runner upstream also uses.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: Copy env
+        run: |
+          grep -o '^[^#]*' .env.example > .env
+          cat .env >> $GITHUB_ENV
+
+      - name: Start database
+        run: docker compose up -d database
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            network=container:database
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: ./
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/beshoyhindy/cal.diy:main-176037d
+          build-args: |
+            NEXT_PUBLIC_WEBAPP_URL=http://localhost:3000
+            NEXT_PUBLIC_API_V2_URL=http://localhost:5555/api/v2
+            NEXT_PUBLIC_LICENSE_CONSENT=agree
+            DATABASE_URL=postgresql://unicorn_user:magical_password@database:5432/calendso
+            DATABASE_DIRECT_URL=postgresql://unicorn_user:magical_password@database:5432/calendso
+
+      - name: Report digest
+        run: |
+          echo "### Image pushed" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "ghcr.io/beshoyhindy/cal.diy@${{ steps.docker_build.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
